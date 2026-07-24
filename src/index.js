@@ -16,6 +16,15 @@ app.use(express.json({ limit: '1mb' }));
 const seenMessages = new Map();
 const DEDUPE_TTL_MS = 5 * 60 * 1000;
 
+// MSG91 accounts can carry more than one WhatsApp number; without this,
+// messages sent to a sibling number on the same account reach this bot too.
+function normalizeNumber(num) {
+  let digits = String(num || '').replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
+  return digits;
+}
+
 function isDuplicate(messageId) {
   if (!messageId) return false;
   const now = Date.now();
@@ -42,12 +51,23 @@ app.post('/webhook/whatsapp', async (req, res) => {
   res.status(200).json({ received: true });
 
   try {
+    console.debug('[webhook] inbound payload', JSON.stringify(req.body));
+
     const inbound = parseInbound(req.body);
 
     if (!inbound) {
       // Status callbacks (delivered/read) land here too — not an error.
-      console.log('[webhook] no message in payload', JSON.stringify(req.body).slice(0, 400));
+      console.log('[webhook] no message in payload', JSON.stringify(req.body).slice(0, 4000));
       return;
+    }
+
+    if (inbound.toNumber && process.env.MSG91_WHATSAPP_NUMBER) {
+      const expected = normalizeNumber(process.env.MSG91_WHATSAPP_NUMBER);
+      const actual = normalizeNumber(inbound.toNumber);
+      if (expected && actual && expected !== actual) {
+        console.log(`[webhook] ignoring message for other number ${inbound.toNumber}`);
+        return;
+      }
     }
 
     if (isDuplicate(inbound.messageId)) {
@@ -55,7 +75,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
       return;
     }
 
-    console.log(`[webhook] ${inbound.waId} kind=${inbound.kind} text="${inbound.text}"`);
+    console.log(
+      `[webhook] ${inbound.waId} kind=${inbound.kind} replyId=${inbound.replyId} text="${inbound.text}"`
+    );
     await handleMessage(inbound);
   } catch (err) {
     console.error('[webhook] handler error:', err.stack || err.message);

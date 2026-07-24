@@ -1,3 +1,82 @@
+/** Empty string counts as absent everywhere in these payloads. */
+function nonEmpty(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+/**
+ * MSG91's flat webhook template quotes every field, so nested structures
+ * (interactive, button, messages, contacts) arrive as JSON strings rather
+ * than objects. Returns null on empty string or a parse failure instead of
+ * throwing, so callers never have to assume a value is an object.
+ */
+function safeJsonParse(value) {
+  if (!nonEmpty(value)) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * MSG91 also has a flat, non-Meta-shaped webhook template (customerNumber /
+ * integratedNumber / uuid / etc, everything quoted as a string). Tried only
+ * after the Meta shapes above have failed to match.
+ */
+function parseMsg91Flat(body) {
+  const customerNumber = nonEmpty(body?.customerNumber);
+  const integratedNumber = nonEmpty(body?.integratedNumber);
+  if (!customerNumber || !integratedNumber) return null;
+
+  const base = {
+    waId: String(customerNumber),
+    messageId: nonEmpty(body.uuid),
+    raw: body,
+    toNumber: String(integratedNumber),
+    name: nonEmpty(body.customerName),
+  };
+
+  // Tapped a list row or reply button — nested Meta form or flat {id, title}.
+  const interactive = safeJsonParse(body.interactive);
+  if (interactive && typeof interactive === 'object') {
+    if (interactive.type === 'list_reply') {
+      const listReply = interactive.list_reply || interactive;
+      return { ...base, kind: 'list_reply', replyId: listReply.id, text: listReply.title };
+    }
+    if (interactive.type === 'button_reply') {
+      const buttonReply = interactive.button_reply || interactive;
+      return { ...base, kind: 'button_reply', replyId: buttonReply.id, text: buttonReply.title };
+    }
+  }
+
+  // Some accounts send button taps in a separate `button` field instead.
+  const button = safeJsonParse(body.button);
+  if (button && typeof button === 'object') {
+    return {
+      ...base,
+      kind: 'button_reply',
+      replyId: button.id || button.payload,
+      text: button.text || button.title || '',
+    };
+  }
+  if (nonEmpty(body.button)) {
+    const value = typeof button === 'string' ? button : body.button;
+    return { ...base, kind: 'button_reply', replyId: value, text: value };
+  }
+
+  if (nonEmpty(body.text)) {
+    return { ...base, kind: 'text', text: body.text };
+  }
+
+  // Image, audio, location, sticker, etc. — treated as off-topic by the flow.
+  return {
+    ...base,
+    kind: 'unsupported',
+    text: '',
+    mediaType: nonEmpty(body.contentType) || nonEmpty(body.messageType) || null,
+  };
+}
+
 /**
  * MSG91 forwards Meta's inbound webhook shape, but the exact nesting has
  * varied between accounts. We probe the known shapes rather than assuming one,
@@ -6,11 +85,11 @@
 function parseInbound(body) {
   const msg =
     body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0] ||
-    body?.messages?.[0] ||
+    (Array.isArray(body?.messages) ? body.messages[0] : null) ||
     body?.message ||
     null;
 
-  if (!msg) return null;
+  if (!msg) return parseMsg91Flat(body);
 
   const waId =
     msg.from ||
@@ -20,7 +99,13 @@ function parseInbound(body) {
 
   if (!waId) return null;
 
-  const base = { waId: String(waId), messageId: msg.id, raw: msg };
+  const toNumber =
+    body?.entry?.[0]?.changes?.[0]?.value?.metadata?.display_phone_number ||
+    body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id ||
+    body?.to ||
+    null;
+
+  const base = { waId: String(waId), messageId: msg.id, raw: msg, toNumber: toNumber ? String(toNumber) : null };
 
   // Tapped a list row
   if (msg.type === 'interactive' && msg.interactive?.type === 'list_reply') {
