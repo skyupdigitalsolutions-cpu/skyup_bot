@@ -2,7 +2,7 @@ const axios = require('axios');
 
 const MSG91_URL =
   process.env.MSG91_BASE_URL ||
-  'https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/';
+  'https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/';
 
 const AUTH_KEY = process.env.MSG91_AUTH_KEY;
 const INTEGRATED_NUMBER = process.env.MSG91_WHATSAPP_NUMBER;
@@ -12,27 +12,25 @@ const client = axios.create({
   timeout: 15000,
   headers: {
     'Content-Type': 'application/json',
+    accept: 'application/json',
     authkey: AUTH_KEY,
   },
 });
 
 /**
- * MSG91 wraps Meta's Cloud API payload. `payload` here is the Meta message
- * object (everything from `messaging_product` down).
+ * MSG91's SESSION endpoint takes a flat body — no `payload` wrapper and no
+ * messaging_product/recipient_type/to, just recipient_number alongside
+ * content_type and the text/interactive object.
  *
  * Retries once on 5xx / network error — MSG91 blips are common and a dropped
  * reply looks to the user like a dead bot.
  */
 async function send(to, payload, { attempt = 1 } = {}) {
   const body = {
+    recipient_number: normalizeTo(to),
     integrated_number: INTEGRATED_NUMBER,
     content_type: payload.type === 'text' ? 'text' : 'interactive',
-    payload: {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to: normalizeTo(to),
-      ...payload,
-    },
+    ...(payload.type === 'text' ? { text: payload.text } : { interactive: payload.interactive }),
   };
 
   try {
